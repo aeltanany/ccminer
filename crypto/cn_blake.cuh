@@ -1,5 +1,8 @@
 //#include <cuda_helper.h>
 
+
+//#include <immintrin.h>
+
 typedef struct {
   uint32_t h[8], s[4], t[2];
   int buflen, nullt;
@@ -49,6 +52,8 @@ __constant__ uint32_t d_blake_cst[16] = {
 	0xC0AC29B7, 0xC97C50DD, 0x3F84D5B5, 0xB5470917
 };
 
+/// orignal  function
+/*
 __device__
 void cn_blake_compress(blake_state * __restrict__ S, const uint8_t * __restrict__ block)
 {
@@ -85,8 +90,68 @@ void cn_blake_compress(blake_state * __restrict__ S, const uint8_t * __restrict_
 
 	for (i = 0; i < 16; ++i) S->h[i % 8] ^= v[i];
 	for (i = 0; i < 8;  ++i) S->h[i] ^= S->s[i % 4];
-}
+}*/
 
+
+//  optimized loop unroll and register blocking
+__device__
+void cn_blake_compress(blake_state * __restrict__ S, const uint8_t * __restrict__ block)
+{
+    uint32_t v[16], m[16], i;
+
+    for (i = 0; i < 16; ++i) m[i] = U8TO32(block + i * 4);
+    for (i = 0; i < 8;  ++i) v[i] = S->h[i];
+    v[ 8] = S->s[0] ^ 0x243F6A88;
+    v[ 9] = S->s[1] ^ 0x85A308D3;
+    v[10] = S->s[2] ^ 0x13198A2E;
+    v[11] = S->s[3] ^ 0x03707344;
+    v[12] = 0xA4093822;
+    v[13] = 0x299F31D0;
+    v[14] = 0x082EFA98;
+    v[15] = 0xEC4E6C89;
+
+    if (S->nullt == 0) {
+        v[12] ^= S->t[0];
+        v[13] ^= S->t[0];
+        v[14] ^= S->t[1];
+        v[15] ^= S->t[1];
+    }
+
+    BLAKE_G(0, 4,  8, 12,  0);
+    BLAKE_G(1, 5,  9, 13,  2);
+    BLAKE_G(2, 6, 10, 14,  4);
+    BLAKE_G(3, 7, 11, 15,  6);
+    BLAKE_G(3, 4,  9, 14, 14);
+    BLAKE_G(2, 7,  8, 13, 12);
+    BLAKE_G(0, 5, 10, 15,  8);
+    BLAKE_G(1, 6, 11, 12, 10);
+
+    S->h[0] ^= v[0];
+    S->h[1] ^= v[1];
+    S->h[2] ^= v[2];
+    S->h[3] ^= v[3];
+    S->h[4] ^= v[4];
+    S->h[5] ^= v[5];
+    S->h[6] ^= v[6];
+    S->h[7] ^= v[7];
+    S->h[0] ^= v[8];
+    S->h[1] ^= v[9];
+    S->h[2] ^= v[10];
+    S->h[3] ^= v[11];
+    S->h[4] ^= v[12];
+    S->h[5] ^= v[13];
+    S->h[6] ^= v[14];
+    S->h[7] ^= v[15];
+    S->h[0] ^= S->s[0];
+    S->h[1] ^= S->s[1];
+    S->h[2] ^= S->s[2];
+    S->h[3] ^= S->s[3];
+    S->h[4] ^= S->s[0];
+    S->h[5] ^= S->s[1];
+    S->h[6] ^= S->s[2];
+    S->h[7] ^= S->s[3];
+}
+/*
 __device__ void cn_blake_update(blake_state * __restrict__ S, const uint8_t * __restrict__ data, uint64_t datalen)
 {
 	int left = S->buflen >> 3;
@@ -116,7 +181,96 @@ __device__ void cn_blake_update(blake_state * __restrict__ S, const uint8_t * __
 	} else {
 		S->buflen = 0;
 	}
+}*/
+
+__device__ void cn_blake_update(blake_state * __restrict__ S, const uint8_t * __restrict__ data, uint64_t datalen)
+{
+    int left = S->buflen >> 3;
+    int fill = 64 - left;
+
+    if (left && (((datalen >> 3) & 0x3F) >= (unsigned) fill)) {
+        // Copy fill bytes to S->buf
+        for (int i = 0; i < fill; i++) {
+            S->buf[left + i] = data[i];
+        }
+        S->t[0] += 512;
+        if (S->t[0] == 0) S->t[1]++;
+        cn_blake_compress(S, S->buf);
+        data += fill;
+        datalen -= (fill << 3);
+        left = 0;
+    }
+
+    while (datalen >= 512) {
+        S->t[0] += 512;
+        if (S->t[0] == 0) S->t[1]++;
+        cn_blake_compress(S, data);
+        data += 64;
+        datalen -= 512;
+    }
+
+    if (datalen > 0) {
+        // Copy datalen bytes to S->buf
+        for (int i = 0; i < (datalen >> 3); i++) {
+            S->buf[left + i] = data[i];
+        }
+        S->buflen = (left << 3) + datalen;
+    } else {
+        S->buflen = 0;
+    }
 }
+
+/*
+not better performance
+__device__ void cn_blake_update(blake_state * __restrict__ S, const uint8_t * __restrict__ data, uint64_t datalen)
+{
+    int left = S->buflen >> 3;
+    int fill = 64 - left;
+
+    if (left && (((datalen >> 3) & 0x3F) >= (unsigned) fill)) {
+        // Copy fill bytes to S->buf
+        for (int i = 0; i < fill; i++) {
+            S->buf[left + i] = data[i];
+        }
+        S->t[0] += 512;
+        if (S->t[0] == 0) S->t[1]++;
+        cn_blake_compress(S, S->buf);
+        data += fill;
+        datalen -= (fill << 3);
+        left = 0;
+    }
+
+    while (datalen >= 512) {
+        S->t[0] += 512;
+        if (S->t[0] == 0) S->t[1]++;
+
+        // Unroll the loop by processing 8 bytes at a time
+        uint64_t* data64 = (uint64_t*) data;
+        cn_blake_compress(S, (const uint8_t*) &data64[0]);
+        cn_blake_compress(S, (const uint8_t*) &data64[1]);
+        cn_blake_compress(S, (const uint8_t*) &data64[2]);
+        cn_blake_compress(S, (const uint8_t*) &data64[3]);
+        cn_blake_compress(S, (const uint8_t*) &data64[4]);
+        cn_blake_compress(S, (const uint8_t*) &data64[5]);
+        cn_blake_compress(S, (const uint8_t*) &data64[6]);
+        cn_blake_compress(S, (const uint8_t*) &data64[7]);
+
+        data += 64;
+        datalen -= 512;
+    }
+
+    if (datalen > 0) {
+        // Copy datalen bytes to S->buf
+        for (int i = 0; i < (datalen >> 3); i++) {
+            S->buf[left + i] = data[i];
+        }
+        S->buflen = (left << 3) + datalen;
+    } else {
+        S->buflen = 0;
+    }
+}
+
+*/
 
 __device__
 void cn_blake_final(blake_state * __restrict__ S, uint8_t * __restrict__ digest)
@@ -162,6 +316,72 @@ void cn_blake_final(blake_state * __restrict__ S, uint8_t * __restrict__ digest)
 	U32TO8(digest + 24, S->h[6]);
 	U32TO8(digest + 28, S->h[7]);
 }
+
+
+
+/*
+// avx attempt
+
+__device__
+void cn_blake_final(blake_state * __restrict__ S, uint8_t * __restrict__ digest)
+{
+    const uint8_t padding[] = {
+            0x80,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+            0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    };
+    uint8_t pa = 0x81, pb = 0x01;
+    uint8_t msglen[8];
+    uint64_t lo = S->t[0] + S->buflen, hi = S->t[1];
+    if (lo < S->buflen) hi++;
+    U64TO8(msglen + 0, hi);
+    U64TO8(msglen + 4, lo);
+
+    __m256i avx2_padding = _mm256_loadu_si256((__m256i const*) padding);
+    __m256i avx2_msglen = _mm256_loadu_si256((__m256i const*) msglen);
+
+    if (S->buflen == 440) {
+        S->t[0] -= 8;
+        cn_blake_update(S, &pa, 8);
+    } else {
+        if (S->buflen < 440) {
+            if (S->buflen == 0) S->nullt = 1;
+            S->t[0] -= 440 - S->buflen;
+            for (int i = 0; i < (440 - S->buflen) / 32; i++) {
+                __m256i avx2_block = _mm256_loadu_si256((__m256i const*) (padding + i*32));
+                cn_blake_update(S, (uint8_t*)&avx2_block, 32);
+            }
+        } else {
+            S->t[0] -= 512 - S->buflen;
+            for (int i = 0; i < (512 - S->buflen) / 32; i++) {
+                __m256i avx2_block = _mm256_loadu_si256((__m256i const*) (padding + i*32));
+                cn_blake_update(S, (uint8_t*)&avx2_block, 32);
+            }
+            S->t[0] -= 440;
+            for (int i = 0; i < 440 / 32; i++) {
+                __m256i avx2_block = _mm256_loadu_si256((__m256i const*) (padding + i*32));
+                cn_blake_update(S, (uint8_t*)&avx2_block, 32);
+            }
+            S->nullt = 1;
+        }
+        cn_blake_update(S, &pb, 8);
+        S->t[0] -= 8;
+    }
+    S->t[0] -= 64;
+    cn_blake_update(S, (uint8_t*)&avx2_msglen, 64);
+
+    U32TO8(digest +  0, S->h[0]);
+    U32TO8(digest + 4, S->h[1]);
+    U32TO8(digest + 8, S->h[2]);
+    U32TO8(digest + 12, S->h[3]);
+    U32TO8(digest + 16, S->h[4]);
+    U32TO8(digest + 20, S->h[5]);
+    U32TO8(digest + 24, S->h[6]);
+    U32TO8(digest + 28, S->h[7]);
+}
+
+
+*/
+
 
 __device__
 void cn_blake(const uint8_t * __restrict__ in, uint64_t inlen, uint32_t * out)
