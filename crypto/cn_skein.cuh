@@ -273,6 +273,8 @@ void cn_skein_update(skeinHashState * __restrict__ state, const uint8_t * __rest
 	}
 }
 
+
+
 __device__
 void cn_skein_final(skeinHashState * __restrict__ state, uint8_t * __restrict__ hashVal)
 {

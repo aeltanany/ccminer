@@ -283,7 +283,7 @@ void cn_groestl_final(groestlHashState*  __restrict__ ctx, BitSequence* __restri
 	}
 #endif
 }
-
+/*
 __device__
 void cn_groestl_update(groestlHashState* __restrict__ ctx,
 	const BitSequence* __restrict__ input, DataLength databitlen)
@@ -319,7 +319,52 @@ void cn_groestl_update(groestlHashState* __restrict__ ctx,
 		ctx->bits_in_last_byte = rem;
 		ctx->buffer[(int)ctx->buf_ptr++] = input[index];
 	}
+}*/
+
+__device__
+void cn_groestl_update(groestlHashState* __restrict__ ctx,
+                       const BitSequence* __restrict__ input, DataLength databitlen)
+{
+    int index = 0;
+    int msglen = (int)(databitlen/8);
+    int rem = (int)(databitlen%8);
+    int buf_ptr = ctx->buf_ptr;
+
+    // Handle partial block from previous update
+    if (buf_ptr) {
+        int bytes_to_copy = min(msglen, GROESTL_SIZE512 - buf_ptr);
+        memcpy(ctx->buffer + buf_ptr, input, bytes_to_copy);
+        buf_ptr += bytes_to_copy;
+        input += bytes_to_copy;
+        msglen -= bytes_to_copy;
+
+        if (buf_ptr == GROESTL_SIZE512) {
+            cn_groestl_transform(ctx, ctx->buffer, GROESTL_SIZE512);
+            buf_ptr = 0;
+        }
+    }
+
+    // Process full blocks
+    while (msglen >= GROESTL_SIZE512) {
+        cn_groestl_transform(ctx, input + index, GROESTL_SIZE512);
+        index += GROESTL_SIZE512;
+        msglen -= GROESTL_SIZE512;
+    }
+
+    // Store remaining bytes
+    if (msglen) {
+        memcpy(ctx->buffer + buf_ptr, input + index, msglen);
+    }
+
+    // Store partial byte if present
+    if (rem) {
+        ctx->bits_in_last_byte = rem;
+        ctx->buffer[buf_ptr + msglen] = input[index + msglen];
+    }
+
+    ctx->buf_ptr = buf_ptr + msglen + (rem != 0);
 }
+
 
 __device__
 void cn_groestl_init(groestlHashState* ctx)

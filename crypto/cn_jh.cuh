@@ -179,6 +179,9 @@ void cn_jh_F8(jhHashState *state)
 		state->x[(8+i) >> 1][(8+i) & 1] ^= ((uint64_t *)state->buffer)[i];
 	}
 }
+/*
+
+ // otignal
 
 __device__
 void cn_jh_update(jhHashState * __restrict__ state, const uint8_t * __restrict__ data, DataLength databitlen)
@@ -220,6 +223,41 @@ void cn_jh_update(jhHashState * __restrict__ state, const uint8_t * __restrict__
 		state->datasize_in_buffer = databitlen;
 	}
 }
+*/
+
+// optimized
+__device__
+void cn_jh_update(jhHashState * __restrict__ state, const uint8_t * __restrict__ data, DataLength databitlen)
+{
+    state->databitlen += databitlen;
+
+    if (state->datasize_in_buffer > 0) {
+        int fill = 512 - state->datasize_in_buffer;
+        if (databitlen < fill) {
+            memcpy(state->buffer + (state->datasize_in_buffer >> 3), data, (databitlen + 7) >> 3);
+            state->datasize_in_buffer += databitlen;
+            return;
+        }
+        memcpy(state->buffer + (state->datasize_in_buffer >> 3), data, fill >> 3);
+        cn_jh_F8(state);
+        data += fill >> 3;
+        databitlen -= fill;
+        state->datasize_in_buffer = 0;
+    }
+
+    while (databitlen >= 512) {
+        memcpy(state->buffer, data, 64);
+        cn_jh_F8(state);
+        data += 64;
+        databitlen -= 512;
+    }
+
+    if (databitlen > 0) {
+        memcpy(state->buffer, data, (databitlen + 7) >> 3);
+        state->datasize_in_buffer = databitlen;
+    }
+}
+
 
 /* pad the message, process the padded block(s), truncate the hash value H to obtain the message digest */
 __device__

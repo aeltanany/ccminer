@@ -53,7 +53,7 @@ static bool init[MAX_GPUS] = { 0 };
 static int valid_sols[MAX_GPUS] = { 0 };
 static uint8_t _ALIGN(64) data_sols[MAX_GPUS][MAXREALSOLS][1536] = { 0 }; // 140+3+1344 required
 static eq_cuda_context_interface* solvers[MAX_GPUS] = { NULL };
-
+/* orignal
 static void CompressArray(const unsigned char* in, size_t in_len,
 	unsigned char* out, size_t out_len, size_t bit_len, size_t byte_pad)
 {
@@ -90,8 +90,69 @@ static void CompressArray(const unsigned char* in, size_t in_len,
 		acc_bits -= 8;
 		out[i] = (acc_value >> acc_bits) & 0xFF;
 	}
-}
+}*/
+// optimized
+static void CompressArray(const unsigned char* in, size_t in_len,
+                          unsigned char* out, size_t out_len, size_t bit_len, size_t byte_pad)
+{
+    assert(bit_len >= 8);
+    assert(8 * sizeof(uint32_t) >= 7 + bit_len);
 
+    size_t in_width = (bit_len + 7) / 8 + byte_pad;
+    assert(out_len == bit_len*in_len / (8 * in_width));
+
+    uint32_t bit_len_mask = (1UL << bit_len) - 1;
+
+    size_t acc_bits = 0;
+    uint32_t acc_value = 0;
+
+    size_t j = 0;
+
+    // Loop unrolling and register blocking
+    size_t loop_iters = out_len / 8;
+    size_t register_block_size = 8;
+
+    for (size_t k = 0; k < loop_iters; k++) {
+        for (size_t i = 0; i < register_block_size; i++) {
+            // When we have fewer than 8 bits left in the accumulator, read the next
+            // input element.
+            if (acc_bits < 8) {
+                acc_value = acc_value << bit_len;
+                for (size_t x = byte_pad; x < in_width; x++) {
+                    acc_value = acc_value | (
+                            (
+                                    // Apply bit_len_mask across byte boundaries
+                                    in[j + x] & ((bit_len_mask >> (8 * (in_width - x - 1))) & 0xFF)
+                            ) << (8 * (in_width - x - 1))); // Big-endian
+                }
+                j += in_width;
+                acc_bits += bit_len;
+            }
+
+            acc_bits -= 8;
+            out[i + k*register_block_size] = (acc_value >> acc_bits) & 0xFF;
+        }
+    }
+
+    // Process any remaining output bytes
+    for (size_t i = loop_iters * register_block_size; i < out_len; i++) {
+        if (acc_bits < 8) {
+            acc_value = acc_value << bit_len;
+            for (size_t x = byte_pad; x < in_width; x++) {
+                acc_value = acc_value | (
+                        (
+                                // Apply bit_len_mask across byte boundaries
+                                in[j + x] & ((bit_len_mask >> (8 * (in_width - x - 1))) & 0xFF)
+                        ) << (8 * (in_width - x - 1))); // Big-endian
+            }
+            j += in_width;
+            acc_bits += bit_len;
+        }
+
+        acc_bits -= 8;
+        out[i] = (acc_value >> acc_bits) & 0xFF;
+    }
+}
 #ifndef htobe32
 #define htobe32(x) swab32(x)
 #endif
